@@ -10,12 +10,12 @@
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
-    "vite": "latest",
-    "typescript": "latest",
+    "firebase": "latest",
+    "lucide-react": "latest",
+    "mqtt": "^5.15.1",
     "react": "latest",
     "react-dom": "latest",
-    "firebase": "latest",
-    "lucide-react": "latest"
-  },
-  "devDependencies": {}
+    "typescript": "latest",
+    "vite": "latest"
+  }
 }

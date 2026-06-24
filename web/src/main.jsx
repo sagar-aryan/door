@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { initializeApp } from 'firebase/app';
 import {
@@ -10,6 +10,7 @@ import {
   signOut,
 } from 'firebase/auth';
 import { getDatabase, onValue, ref, serverTimestamp, set } from 'firebase/database';
+import mqtt from 'mqtt';
 import { Camera, KeyRound, LogOut, RefreshCcw, ShieldCheck, Wifi, WifiOff } from 'lucide-react';
 import './styles.css';
 
@@ -21,12 +22,23 @@ const firebaseConfig = {
 };
 
 const DEVICE_ID = import.meta.env.VITE_INTERCOM_DEVICE_ID || 'front-gate';
+const mqttConfig = {
+  wsUrl: import.meta.env.VITE_MQTT_WS_URL || '',
+  username: import.meta.env.VITE_MQTT_USERNAME || '',
+  password: import.meta.env.VITE_MQTT_PASSWORD || '',
+  topicPrefix: import.meta.env.VITE_MQTT_TOPIC_PREFIX || `intercom/${DEVICE_ID}`,
+};
+
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getDatabase(app);
 
 function isConfigured() {
   return Boolean(firebaseConfig.apiKey && firebaseConfig.authDomain && firebaseConfig.databaseURL && firebaseConfig.projectId);
+}
+
+function isMqttConfigured() {
+  return Boolean(mqttConfig.wsUrl);
 }
 
 function Login({ onError }) {
@@ -72,6 +84,10 @@ function App() {
   const [statusError, setStatusError] = useState('');
   const [pendingAction, setPendingAction] = useState('');
   const [lastCommand, setLastCommand] = useState(null);
+  const [mqttConnected, setMqttConnected] = useState(false);
+  const [mqttDeviceStatus, setMqttDeviceStatus] = useState(null);
+  const [mqttAck, setMqttAck] = useState(null);
+  const mqttClientRef = useRef(null);
 
   useEffect(() => {
     if (!isConfigured()) return;
@@ -93,18 +109,83 @@ function App() {
     });
   }, [user]);
 
+  useEffect(() => {
+    if (!user || !isMqttConfigured()) return undefined;
+
+    const client = mqtt.connect(mqttConfig.wsUrl, {
+      username: mqttConfig.username || undefined,
+      password: mqttConfig.password || undefined,
+      keepalive: 15,
+      reconnectPeriod: 700,
+      connectTimeout: 3000,
+      clean: true,
+      clientId: `web-${DEVICE_ID}-${Date.now().toString(36)}-${Math.random().toString(16).slice(2)}`,
+    });
+
+    mqttClientRef.current = client;
+
+    client.on('connect', () => {
+      setMqttConnected(true);
+      client.subscribe(`${mqttConfig.topicPrefix}/ack`, { qos: 1 });
+      client.subscribe(`${mqttConfig.topicPrefix}/status`, { qos: 1 });
+    });
+
+    client.on('reconnect', () => setMqttConnected(false));
+    client.on('close', () => setMqttConnected(false));
+    client.on('offline', () => setMqttConnected(false));
+    client.on('error', (error) => {
+      console.error(error);
+      setMqttConnected(false);
+    });
+
+    client.on('message', (topic, payload) => {
+      try {
+        const message = JSON.parse(payload.toString());
+        if (topic.endsWith('/status')) setMqttDeviceStatus({ ...message, receivedAt: Date.now() });
+        if (topic.endsWith('/ack')) setMqttAck({ ...message, receivedAt: Date.now() });
+      } catch (error) {
+        console.error(error);
+      }
+    });
+
+    return () => {
+      mqttClientRef.current = null;
+      client.end(true);
+      setMqttConnected(false);
+    };
+  }, [user]);
+
   const online = useMemo(() => {
+    if (isMqttConfigured()) return Boolean(mqttConnected && mqttDeviceStatus?.online);
     if (!status?.lastSeenEpoch) return false;
     return Date.now() - Number(status.lastSeenEpoch) < 15000;
-  }, [status]);
+  }, [mqttConnected, mqttDeviceStatus, status]);
 
   const commandAwaitingCompletion = useMemo(() => {
     if (!lastCommand?.id) return false;
+    if (mqttAck?.id === lastCommand.id && mqttAck?.stage === 'done') return false;
     if (status?.lastCompletedCommandId === lastCommand.id) return false;
     return Date.now() - lastCommand.localCreatedAt < 15000;
-  }, [lastCommand, status]);
+  }, [lastCommand, mqttAck, status]);
 
-  const busy = Boolean(status?.busy || pendingAction || commandAwaitingCompletion);
+  const deviceBusy = isMqttConfigured() ? Boolean(mqttDeviceStatus?.busy) : Boolean(status?.busy);
+  const deviceActiveButton = isMqttConfigured() ? mqttDeviceStatus?.activeButton : status?.activeButton;
+  const busy = Boolean(deviceBusy || pendingAction || commandAwaitingCompletion);
+
+  function publishMqttCommand(command) {
+    return new Promise((resolve, reject) => {
+      const client = mqttClientRef.current;
+      if (!client?.connected) {
+        reject(new Error('MQTT is not connected'));
+        return;
+      }
+
+      client.publish(`${mqttConfig.topicPrefix}/command`, JSON.stringify(command), { qos: 1, retain: false }, (error) => {
+        if (error) reject(error);
+        else resolve();
+      });
+    });
+  }
 
   async function sendCommand(action) {
     if (busy) return;
@@ -114,13 +195,18 @@ function App() {
       id,
       action,
       requestedAt: serverTimestamp(),
+      clientSentAt: Date.now(),
       requestedBy: user.email || user.uid,
     };
+    setLastCommand({ ...command, localCreatedAt: Date.now() });
     try {
+      if (isMqttConfigured()) await publishMqttCommand({ ...command, requestedAt: Date.now() });
       await set(ref(db, `devices/${DEVICE_ID}/command`), command);
-      setLastCommand({ ...command, localCreatedAt: Date.now() });
+    } catch (error) {
+      console.error(error);
+      await set(ref(db, `devices/${DEVICE_ID}/command`), command);
     } finally {
-      setTimeout(() => setPendingAction(''), 1200);
+      setTimeout(() => setPendingAction(''), 300);
     }
   }
 
@@ -151,7 +237,7 @@ function App() {
           {online ? <Wifi size={20} /> : <WifiOff size={20} />}
           <div>
             <strong>{online ? 'Device online' : 'Device offline'}</strong>
-            <span>{status?.message || 'Waiting for ESP32-C3 status'}</span>
+            <span>{mqttDeviceStatus?.message || status?.message || 'Waiting for ESP32-C3 status'}</span>
           </div>
         </div>
         <button className="refresh" type="button" onClick={() => window.location.reload()}><RefreshCcw size={16} /> Refresh</button>
@@ -171,9 +257,10 @@ function App() {
       </section>
 
       <section className="details">
-        <div><span>Servo state</span><strong>{status?.busy ? `Pressing ${status.activeButton || ''}` : 'Ready'}</strong></div>
-        <div><span>Last completed</span><strong>{status?.lastCompletedAction || 'None'}</strong></div>
+        <div><span>Servo state</span><strong>{deviceBusy ? `Pressing ${deviceActiveButton || ''}` : 'Ready'}</strong></div>
+        <div><span>Last completed</span><strong>{mqttAck?.stage === 'done' ? mqttAck.action : status?.lastCompletedAction || 'None'}</strong></div>
         <div><span>Device ID</span><strong>{DEVICE_ID}</strong></div>
+        <div><span>Command path</span><strong>{isMqttConfigured() ? (mqttConnected ? 'MQTT live' : 'MQTT reconnecting') : 'Firebase fallback'}</strong></div>
         <div><span>Last command</span><strong>{lastCommand?.action || status?.lastCommandAction || 'None'}</strong></div>
       </section>
     </main>
