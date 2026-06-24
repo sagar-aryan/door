@@ -1,0 +1,21 @@
+{
+  "authorizedUsers": {
+    "uid": true,
+    "uid": true
+  },
+  "devices": {
+    "front-gate": {
+      "status": {
+        "busy": false,
+        "message": "Not connected yet",
+        "lastSeen": 0
+      },
+      "command": {
+        "id": "initial",
+        "action": "none",
+        "requestedAt": 0,
+        "requestedBy": "setup"
+      }
+    }
+  }
+}

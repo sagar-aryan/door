@@ -1,0 +1,62 @@
+* { box-sizing: border-box; }
+:root {
+  color-scheme: light;
+  --bg: #f4f6f8;
+  --panel: #ffffff;
+  --text: #111827;
+  --muted: #667085;
+  --line: #d0d5dd;
+  --blue: #2563eb;
+  --blue-soft: #eff6ff;
+  --amber: #d97706;
+  --amber-soft: #fffbeb;
+  --green: #067647;
+  --red: #b42318;
+}
+html, body, #root { min-height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--text); font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+button, input { font: inherit; }
+button { -webkit-tap-highlight-color: transparent; }
+.login-shell, .loading, .setup-missing { min-height: 100dvh; display: grid; place-items: center; padding: 18px; }
+.login-panel, .setup-missing { width: min(100%, 380px); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 18px; box-shadow: 0 1px 2px rgba(16, 24, 40, .08); }
+.brand-lock { width: 44px; height: 44px; display: grid; place-items: center; border-radius: 8px; background: var(--blue-soft); color: var(--blue); margin-bottom: 14px; }
+h1 { margin: 0; font-size: 24px; line-height: 1.1; letter-spacing: 0; }
+.login-panel h1 { margin-bottom: 18px; }
+label { display: block; margin: 12px 0 6px; font-size: 13px; color: #475467; }
+input { width: 100%; min-height: 46px; border: 1px solid #98a2b3; border-radius: 6px; padding: 0 12px; background: #fff; color: var(--text); }
+.primary { width: 100%; min-height: 46px; margin-top: 14px; border: 0; border-radius: 6px; background: var(--blue); color: #fff; font-weight: 760; }
+.primary:disabled { opacity: .7; }
+.form-error, .alert { color: var(--red); min-height: 20px; font-size: 13px; line-height: 1.35; }
+.app-shell { width: min(100vw, 560px); min-height: 100dvh; margin: 0 auto; padding: max(14px, env(safe-area-inset-top)) 14px max(18px, env(safe-area-inset-bottom)); display: grid; grid-template-rows: auto auto auto 1fr; gap: 14px; }
+header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.eyebrow { margin: 0 0 4px; font-size: 12px; color: var(--muted); font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+.icon-button { width: 42px; height: 42px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--muted); display: grid; place-items: center; }
+.status-strip { display: flex; align-items: stretch; justify-content: space-between; gap: 10px; }
+.connection { flex: 1; min-height: 64px; display: flex; align-items: center; gap: 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
+.connection svg { flex: 0 0 auto; }
+.connection strong, .connection span { display: block; }
+.connection strong { font-size: 14px; line-height: 1.2; }
+.connection span { margin-top: 2px; color: var(--muted); font-size: 12px; line-height: 1.25; }
+.connection.online svg { color: var(--green); }
+.connection.offline svg { color: var(--red); }
+.refresh { min-width: 96px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--muted); display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+.controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.action { min-height: 156px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--text); padding: 16px 10px 14px; display: grid; place-items: center; gap: 10px; box-shadow: 0 1px 2px rgba(16, 24, 40, .08); }
+.action span { font-size: 17px; line-height: 1.2; font-weight: 780; }
+.action.camera svg { color: var(--blue); }
+.action.unlock svg { color: var(--amber); }
+.action:disabled { opacity: .64; cursor: wait; }
+.action:active { transform: translateY(1px); }
+.details { align-self: start; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.details div { display: flex; justify-content: space-between; gap: 12px; padding: 12px; border-bottom: 1px solid var(--line); }
+.details div:last-child { border-bottom: 0; }
+.details span { color: var(--muted); font-size: 13px; }
+.details strong { text-align: right; font-size: 13px; }
+@media (max-width: 360px) {
+  .app-shell { padding-left: 10px; padding-right: 10px; }
+  .status-strip { display: grid; }
+  .refresh { min-height: 42px; }
+  .controls { gap: 8px; }
+  .action { min-height: 132px; }
+  .action svg { width: 42px; height: 42px; }
+}
