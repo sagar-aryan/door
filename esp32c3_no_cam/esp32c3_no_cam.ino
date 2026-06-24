@@ -2,6 +2,7 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
+#include <PubSubClient.h>
 #include <esp_arduino_version.h>
 
 // ===========================
@@ -12,19 +13,25 @@ const char *WIFI_PASSWORD = "ssid password";
 
 // ===========================
 // Firebase configuration
+// Firebase is now fallback/status only. MQTT is the fast command path.
 // ===========================
-// From the Firebase config screen you just saw:
-const char *FIREBASE_API_KEY = "api key";
-const char *FIREBASE_DATABASE_URL = "url";
-
-// The device user you created in Authentication → Users:
-const char *FIREBASE_DEVICE_EMAIL = "email";
+const char *FIREBASE_API_KEY = "firebase api";
+const char *FIREBASE_DATABASE_URL = "firebase api";
+const char *FIREBASE_DEVICE_EMAIL = "username";
 const char *FIREBASE_DEVICE_PASSWORD = "password";
-
-// Leave this exactly as is:
 const char *DEVICE_ID = "front-gate";
 
-// Servo pinout stays the same as the previous build.
+// ===========================
+// MQTT configuration
+// Use a cloud broker that supports MQTT over TLS on 8883 and browser WSS.
+// Examples: HiveMQ Cloud or EMQX Serverless.
+// ===========================
+const char *MQTT_HOST = "mqtt host";
+const int MQTT_PORT = 8883;
+const char *MQTT_USERNAME = "name";
+const char *MQTT_PASSWORD = "password";
+const char *MQTT_TOPIC_PREFIX = "intercom/front-gate";
+
 static const int SERVO_CAMERA_PIN = 4;
 static const int SERVO_UNLOCK_PIN = 5;
 static const int SERVO_CAMERA_CHANNEL = 0;
@@ -37,23 +44,28 @@ static const int SERVO_UNLOCK_PRESS_ANGLE = 150;
 
 static const int PRESS_HOLD_MS = 550;
 static const int RETURN_SETTLE_MS = 250;
-static const unsigned long POLL_INTERVAL_MS = 1000;
-static const unsigned long STATUS_INTERVAL_MS = 5000;
+static const unsigned long FALLBACK_POLL_INTERVAL_MS = 3000;
+static const unsigned long STATUS_INTERVAL_MS = 60000;
 static const unsigned long TOKEN_REFRESH_MS = 50UL * 60UL * 1000UL;
+static const unsigned long MQTT_RECONNECT_INTERVAL_MS = 500;
 
 static const int SERVO_PWM_HZ = 50;
 static const int SERVO_PWM_BITS = 14;
 static const int SERVO_MIN_US = 500;
 static const int SERVO_MAX_US = 2500;
 
-WiFiClientSecure secureClient;
+WiFiClientSecure requestClient;
+WiFiClientSecure mqttSecureClient;
+PubSubClient mqttClient(mqttSecureClient);
+
 String idToken;
 String lastProcessedCommandId = "";
 String activeAction = "";
 bool servoBusy = false;
-unsigned long lastPollAt = 0;
+unsigned long lastFallbackPollAt = 0;
 unsigned long lastStatusAt = 0;
 unsigned long lastLoginAt = 0;
+unsigned long lastMqttConnectAttemptAt = 0;
 
 String jsonEscape(const String &value) {
   String out;
@@ -101,6 +113,14 @@ String firebasePath(const String &path) {
   return url;
 }
 
+bool mqttConfigured() {
+  return strlen(MQTT_HOST) > 0 && strcmp(MQTT_HOST, "your-cluster-host.example.com") != 0;
+}
+
+String topic(const char *suffix) {
+  return String(MQTT_TOPIC_PREFIX) + suffix;
+}
+
 int angleToDuty(int angle) {
   angle = constrain(angle, 0, 180);
   int pulseUs = map(angle, 0, 180, SERVO_MIN_US, SERVO_MAX_US);
@@ -134,8 +154,8 @@ void moveToRest() {
 
 bool firebaseRequest(const char *method, const String &url, const String &body, String *response) {
   HTTPClient http;
-  http.setTimeout(10000);
-  if (!http.begin(secureClient, url)) {
+  http.setTimeout(1200);
+  if (!http.begin(requestClient, url)) {
     Serial.println("HTTP begin failed");
     return false;
   }
@@ -187,7 +207,19 @@ bool ensureFirebaseToken() {
   return true;
 }
 
-void updateStatus(const String &message) {
+void publishMqttStatus(const String &message) {
+  if (!mqttClient.connected()) return;
+  String body = "{\"online\":true,\"busy\":" + String(servoBusy ? "true" : "false") + ",\"activeButton\":\"" + jsonEscape(activeAction) + "\",\"message\":\"" + jsonEscape(message) + "\"}";
+  mqttClient.publish(topic("/status").c_str(), body.c_str(), true);
+}
+
+void publishMqttAck(const String &commandId, const String &action, const String &stage) {
+  if (!mqttClient.connected()) return;
+  String body = "{\"id\":\"" + jsonEscape(commandId) + "\",\"action\":\"" + jsonEscape(action) + "\",\"stage\":\"" + jsonEscape(stage) + "\",\"deviceMillis\":" + String((unsigned long long)millis()) + "}";
+  mqttClient.publish(topic("/ack").c_str(), body.c_str(), false);
+}
+
+void updateFirebaseStatus(const String &message) {
   if (!ensureFirebaseToken()) return;
   String path = "/devices/" + String(DEVICE_ID) + "/status";
   String body = "{"
@@ -203,6 +235,9 @@ void updateStatus(const String &message) {
 }
 
 void markCommandDone(const String &commandId, const String &action) {
+  publishMqttAck(commandId, action, "done");
+  publishMqttStatus("Ready");
+
   if (!ensureFirebaseToken()) return;
   String path = "/devices/" + String(DEVICE_ID) + "/status";
   String body = "{"
@@ -218,17 +253,21 @@ void markCommandDone(const String &commandId, const String &action) {
   firebaseRequest("PATCH", firebasePath(path), body, nullptr);
 }
 
-void pressServo(const String &action) {
+void pressServo(const String &action, const String &commandId) {
   servoBusy = true;
   activeAction = action;
-  updateStatus("Pressing " + action);
+  publishMqttStatus("Pressing " + action);
 
   if (action == "camera") {
     writeServoAngle(SERVO_CAMERA_PIN, SERVO_CAMERA_CHANNEL, SERVO_CAMERA_PRESS_ANGLE);
+    Serial.println("SERVO_START camera " + commandId);
+    publishMqttAck(commandId, action, "started");
     delay(PRESS_HOLD_MS);
     writeServoAngle(SERVO_CAMERA_PIN, SERVO_CAMERA_CHANNEL, SERVO_CAMERA_REST_ANGLE);
   } else if (action == "unlock") {
     writeServoAngle(SERVO_UNLOCK_PIN, SERVO_UNLOCK_CHANNEL, SERVO_UNLOCK_PRESS_ANGLE);
+    Serial.println("SERVO_START unlock " + commandId);
+    publishMqttAck(commandId, action, "started");
     delay(PRESS_HOLD_MS);
     writeServoAngle(SERVO_UNLOCK_PIN, SERVO_UNLOCK_CHANNEL, SERVO_UNLOCK_REST_ANGLE);
   }
@@ -237,7 +276,29 @@ void pressServo(const String &action) {
   servoBusy = false;
 }
 
-void pollCommand() {
+bool runCommandFromJson(const String &json, const String &source) {
+  if (json == "null" || json.length() == 0) return false;
+
+  String commandId = extractJsonString(json, "id");
+  String action = extractJsonString(json, "action");
+  if (commandId.length() == 0 || action.length() == 0 || action == "none") return false;
+  if (commandId == lastProcessedCommandId) return false;
+
+  if (action != "camera" && action != "unlock") {
+    Serial.println("Ignoring unknown action from " + source + ": " + action);
+    lastProcessedCommandId = commandId;
+    return false;
+  }
+
+  Serial.println("Running command from " + source + ": " + commandId + " action=" + action + " at " + String((unsigned long long)millis()));
+  pressServo(action, commandId);
+  lastProcessedCommandId = commandId;
+  activeAction = "";
+  markCommandDone(commandId, action);
+  return true;
+}
+
+void syncInitialCommandId() {
   if (!ensureFirebaseToken()) return;
 
   String path = "/devices/" + String(DEVICE_ID) + "/command";
@@ -246,20 +307,66 @@ void pollCommand() {
   if (response == "null" || response.length() == 0) return;
 
   String commandId = extractJsonString(response, "id");
-  String action = extractJsonString(response, "action");
-  if (commandId.length() == 0 || action.length() == 0 || action == "none") return;
-  if (commandId == lastProcessedCommandId) return;
-  if (action != "camera" && action != "unlock") {
-    Serial.println("Ignoring unknown action: " + action);
+  if (commandId.length() > 0) {
     lastProcessedCommandId = commandId;
-    return;
+    Serial.println("Initial command synced without replay: " + commandId);
+  }
+}
+
+void fallbackPollCommand() {
+  if (!ensureFirebaseToken()) return;
+
+  String path = "/devices/" + String(DEVICE_ID) + "/command";
+  String response;
+  if (!firebaseRequest("GET", firebasePath(path), "", &response)) return;
+  runCommandFromJson(response, "firebase fallback poll");
+}
+
+void mqttCallback(char *messageTopic, byte *payload, unsigned int length) {
+  String expectedTopic = topic("/command");
+  if (String(messageTopic) != expectedTopic) return;
+
+  String json;
+  json.reserve(length + 1);
+  for (unsigned int i = 0; i < length; i++) json += (char)payload[i];
+  runCommandFromJson(json, "mqtt");
+}
+
+bool connectMqtt() {
+  if (!mqttConfigured()) return false;
+  if (mqttClient.connected()) return true;
+
+  unsigned long now = millis();
+  if (now - lastMqttConnectAttemptAt < MQTT_RECONNECT_INTERVAL_MS) return false;
+  lastMqttConnectAttemptAt = now;
+
+  String clientId = "esp32c3-" + String(DEVICE_ID) + "-" + String((uint32_t)ESP.getEfuseMac(), HEX);
+  String statusTopic = topic("/status");
+  String offlinePayload = "{\"online\":false,\"busy\":false,\"activeButton\":\"\",\"message\":\"MQTT disconnected\"}";
+
+  Serial.println("Connecting MQTT...");
+  bool ok;
+  if (strlen(MQTT_USERNAME) > 0) {
+    ok = mqttClient.connect(clientId.c_str(), MQTT_USERNAME, MQTT_PASSWORD, statusTopic.c_str(), 1, true, offlinePayload.c_str());
+  } else {
+    ok = mqttClient.connect(clientId.c_str(), statusTopic.c_str(), 1, true, offlinePayload.c_str());
   }
 
-  Serial.println("Running command " + commandId + " action=" + action);
-  pressServo(action);
-  lastProcessedCommandId = commandId;
-  activeAction = "";
-  markCommandDone(commandId, action);
+  if (!ok) {
+    Serial.printf("MQTT connect failed, state=%d\n", mqttClient.state());
+    return false;
+  }
+
+  String commandTopic = topic("/command");
+  mqttClient.subscribe(commandTopic.c_str(), 1);
+  publishMqttStatus("Ready");
+  Serial.println("MQTT connected and subscribed to " + commandTopic);
+  return true;
+}
+
+void processMqtt() {
+  if (!mqttConfigured()) return;
+  if (connectMqtt()) mqttClient.loop();
 }
 
 void connectWiFi() {
@@ -285,9 +392,18 @@ void setup() {
   moveToRest();
 
   connectWiFi();
-  secureClient.setInsecure();
+  requestClient.setInsecure();
+  mqttSecureClient.setInsecure();
+  mqttClient.setServer(MQTT_HOST, MQTT_PORT);
+  mqttClient.setCallback(mqttCallback);
+  mqttClient.setBufferSize(768);
+  mqttClient.setKeepAlive(15);
+  mqttClient.setSocketTimeout(1);
+
   ensureFirebaseToken();
-  updateStatus("Ready");
+  syncInitialCommandId();
+  updateFirebaseStatus("Ready");
+  connectMqtt();
 }
 
 void loop() {
@@ -297,12 +413,16 @@ void loop() {
   }
 
   unsigned long now = millis();
-  if (now - lastPollAt >= POLL_INTERVAL_MS) {
-    lastPollAt = now;
-    pollCommand();
+  processMqtt();
+
+  if ((!mqttConfigured() || !mqttClient.connected()) && now - lastFallbackPollAt >= FALLBACK_POLL_INTERVAL_MS) {
+    lastFallbackPollAt = now;
+    fallbackPollCommand();
   }
+
   if (now - lastStatusAt >= STATUS_INTERVAL_MS) {
     lastStatusAt = now;
-    updateStatus(servoBusy ? "Busy" : "Ready");
+    updateFirebaseStatus(servoBusy ? "Busy" : "Ready");
+    publishMqttStatus(servoBusy ? "Busy" : "Ready");
   }
 }
